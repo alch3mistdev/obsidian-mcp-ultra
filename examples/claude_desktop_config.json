@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "obsidian-mcp-ultra": {
+      "command": "node",
+      "args": [
+        "/path/to/obsidian-mcp-ultra/dist/index.js",
+        "/path/to/your/vault"
+      ]
+    }
+  }
+}
