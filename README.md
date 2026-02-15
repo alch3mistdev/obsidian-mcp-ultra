@@ -217,3 +217,68 @@ Contributions welcome! Please open an issue or PR.
 - [Model Context Protocol](https://modelcontextprotocol.io/)
 - [Obsidian](https://obsidian.md/)
 
+
+## Verification
+
+### Quick Verification Test
+
+After installation, verify the server works:
+
+```bash
+# Build the project
+npm run build
+
+# Run tests
+npm test
+
+# Test with sample vault
+npx tsx examples/test-vault.ts
+```
+
+All tests should pass and the sample vault should be processed successfully.
+
+### MCP Server Test
+
+Test the MCP server directly:
+
+```bash
+# Start the server with sample vault
+node dist/index.js examples/sample-vault
+```
+
+The server should output:
+```
+Building vault graph...
+Graph built successfully
+Obsidian MCP Ultra server running on stdio
+```
+
+Press Ctrl+C to stop the server.
+
+## Troubleshooting
+
+### Common Issues
+
+**Issue:** `Cannot find module '@modelcontextprotocol/sdk'`
+**Solution:** Run `npm install` to install dependencies
+
+**Issue:** `ENOENT: no such file or directory`
+**Solution:** Ensure the vault path is absolute and exists
+
+**Issue:** TypeScript compilation errors
+**Solution:** Run `npm run build` to compile TypeScript
+
+**Issue:** Tests failing
+**Solution:** Clear the build cache with `rm -rf dist && npm run build`
+
+## Version History
+
+### v1.0.0 (2024-02-15)
+- Initial release
+- Full MCP protocol support
+- 9 tools, 4 resources, 2 prompts
+- Knowledge graph implementation
+- Caching and performance optimization
+- Comprehensive test suite
+- Complete documentation
+
