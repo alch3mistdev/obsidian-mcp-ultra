@@ -15,40 +15,47 @@ import {
   ListPromptsRequestSchema,
   GetPromptRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import { watch } from 'fs';
 import { Vault } from './vault/vault.js';
 import { GraphBuilder } from './graph/builder.js';
 
-// Get vault path from environment variable or command line argument
-const vaultPath = process.env.OBSIDIAN_VAULT_PATH || process.argv[2];
+// Get API configuration from environment variables or command line
+const apiUrl = process.env.OBSIDIAN_API_URL || 'http://127.0.0.1:27123';
+const apiKey = process.env.OBSIDIAN_API_KEY || process.argv[2];
 
-if (!vaultPath) {
-  console.error('Error: Vault path not provided');
-  console.error('Usage: obsidian-mcp-ultra <vault-path>');
-  console.error('Or set OBSIDIAN_VAULT_PATH environment variable');
+if (!apiKey) {
+  console.error('Error: API key not provided');
+  console.error('Usage: obsidian-mcp-ultra <api-key>');
+  console.error('Or set OBSIDIAN_API_KEY environment variable');
+  console.error('Optionally set OBSIDIAN_API_URL (default: http://127.0.0.1:27123)');
+  process.exit(1);
+}
+
+// Verify connection to Obsidian REST API
+try {
+  const healthCheck = await fetch(`${apiUrl}/`, {
+    headers: { 'Authorization': `Bearer ${apiKey}` },
+  });
+  if (!healthCheck.ok) {
+    console.error(`Error: Cannot authenticate with Obsidian REST API (HTTP ${healthCheck.status})`);
+    console.error('Check your OBSIDIAN_API_KEY');
+    process.exit(1);
+  }
+  console.error('Connected to Obsidian REST API');
+} catch {
+  console.error('Error: Cannot connect to Obsidian REST API');
+  console.error(`URL: ${apiUrl}`);
+  console.error('Ensure Obsidian is running with the Local REST API plugin enabled');
   process.exit(1);
 }
 
 // Initialize vault and graph
-const vault = new Vault({ path: vaultPath, cacheEnabled: true });
+const vault = new Vault({ apiUrl, apiKey, cacheEnabled: true });
 const graph = new GraphBuilder(vault);
 
 // Build initial graph
 console.error('Building vault graph...');
 await graph.buildGraph();
 console.error('Graph built successfully');
-
-// Watch vault for external changes and invalidate cache
-try {
-  watch(vaultPath, { recursive: true }, (eventType, filename) => {
-    if (filename && filename.endsWith('.md')) {
-      vault.clearCache();
-    }
-  });
-} catch {
-  // fs.watch may not support recursive on all platforms; non-fatal
-  console.error('Warning: File watching not available, cache may become stale');
-}
 
 // Create MCP server
 const server = new Server(

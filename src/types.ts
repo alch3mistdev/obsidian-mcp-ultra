@@ -3,7 +3,8 @@
  */
 
 export interface VaultConfig {
-  path: string;
+  apiUrl: string;
+  apiKey: string;
   cacheEnabled?: boolean;
 }
 

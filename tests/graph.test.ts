@@ -1,30 +1,59 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { promises as fs } from 'fs';
-import { join } from 'path';
-import { mkdtemp } from 'fs/promises';
-import { tmpdir } from 'os';
-import { Vault } from '../src/vault/vault.js';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { GraphBuilder } from '../src/graph/builder.js';
+import type { Vault } from '../src/vault/vault.js';
+import type { Note, Link } from '../src/types.js';
+
+function makeNote(
+  path: string,
+  content: string,
+  links: Link[] = [],
+  tags: string[] = [],
+): Note {
+  return {
+    path,
+    title: path.replace(/\.md$/, '').split('/').pop() || '',
+    content,
+    frontmatter: {},
+    links,
+    backlinks: [],
+    tags,
+    headings: [],
+  };
+}
 
 describe('GraphBuilder', () => {
-  let tempDir: string;
-  let vault: Vault;
+  let mockVault: {
+    listNotes: ReturnType<typeof vi.fn>;
+    readNote: ReturnType<typeof vi.fn>;
+    clearCache: ReturnType<typeof vi.fn>;
+  };
   let graph: GraphBuilder;
 
-  beforeEach(async () => {
-    tempDir = await mkdtemp(join(tmpdir(), 'graph-test-'));
-    vault = new Vault({ path: tempDir, cacheEnabled: true });
-    graph = new GraphBuilder(vault);
-  });
-
-  afterEach(async () => {
-    await fs.rm(tempDir, { recursive: true, force: true });
+  beforeEach(() => {
+    mockVault = {
+      listNotes: vi.fn(),
+      readNote: vi.fn(),
+      clearCache: vi.fn(),
+    };
+    graph = new GraphBuilder(mockVault as unknown as Vault);
   });
 
   describe('buildGraph', () => {
     it('should build a graph from vault notes', async () => {
-      await vault.createNote('note1.md', '# Note 1\n\nLinks to [[Note 2]]');
-      await vault.createNote('note2.md', '# Note 2\n\nLinks to [[Note 1]]');
+      const note1 = makeNote('note1.md', 'Links to [[Note 2]]', [
+        { target: 'Note 2', type: 'wikilink' },
+      ]);
+      const note2 = makeNote('note2.md', 'Links to [[Note 1]]', [
+        { target: 'Note 1', type: 'wikilink' },
+      ]);
+
+      mockVault.listNotes.mockResolvedValue(['note1.md', 'note2.md']);
+      mockVault.readNote.mockImplementation(async (path: string) => {
+        if (path === 'note1.md') return note1;
+        if (path === 'note2.md') return note2;
+        throw new Error(`Not found: ${path}`);
+      });
+
       await graph.buildGraph();
 
       const stats = graph.getStats();
@@ -33,16 +62,26 @@ describe('GraphBuilder', () => {
     });
 
     it('should resolve wikilinks to graph nodes', async () => {
-      await vault.createNote('Projects/Alpha.md', '# Alpha\n\nSee [[Beta]]');
-      await vault.createNote('Notes/Beta.md', '# Beta\n\nRelated to [[Alpha]]');
+      const alpha = makeNote('Projects/Alpha.md', 'See [[Beta]]', [
+        { target: 'Beta', type: 'wikilink' },
+      ]);
+      const beta = makeNote('Notes/Beta.md', 'Related to [[Alpha]]', [
+        { target: 'Alpha', type: 'wikilink' },
+      ]);
+
+      mockVault.listNotes.mockResolvedValue(['Projects/Alpha.md', 'Notes/Beta.md']);
+      mockVault.readNote.mockImplementation(async (path: string) => {
+        if (path === 'Projects/Alpha.md') return alpha;
+        if (path === 'Notes/Beta.md') return beta;
+        throw new Error(`Not found: ${path}`);
+      });
+
       await graph.buildGraph();
 
-      // Alpha should have outlink to Beta (resolved via filename)
-      const alpha = graph.getNode('Projects/Alpha.md');
-      expect(alpha).toBeDefined();
-      expect(alpha!.outlinks).toContain('Beta');
+      const alphaNode = graph.getNode('Projects/Alpha.md');
+      expect(alphaNode).toBeDefined();
+      expect(alphaNode!.outlinks).toContain('Beta');
 
-      // Beta should have a backlink from Alpha
       const backlinks = graph.getBacklinks('Notes/Beta.md');
       expect(backlinks).toContain('Projects/Alpha.md');
     });
@@ -50,15 +89,23 @@ describe('GraphBuilder', () => {
 
   describe('getBacklinks (fuzzy resolution)', () => {
     it('should find backlinks using fuzzy path resolution', async () => {
-      await vault.createNote('note1.md', 'Links to [[note2]]');
-      await vault.createNote('note2.md', 'Target note');
+      const note1 = makeNote('note1.md', 'Links to [[note2]]', [
+        { target: 'note2', type: 'wikilink' },
+      ]);
+      const note2 = makeNote('note2.md', 'Target note');
+
+      mockVault.listNotes.mockResolvedValue(['note1.md', 'note2.md']);
+      mockVault.readNote.mockImplementation(async (path: string) => {
+        if (path === 'note1.md') return note1;
+        if (path === 'note2.md') return note2;
+        throw new Error(`Not found: ${path}`);
+      });
+
       await graph.buildGraph();
 
-      // Should work with exact path
       const bl1 = graph.getBacklinks('note2.md');
       expect(bl1).toContain('note1.md');
 
-      // Should also work without .md extension
       const bl2 = graph.getBacklinks('note2');
       expect(bl2).toContain('note1.md');
     });
@@ -66,9 +113,21 @@ describe('GraphBuilder', () => {
 
   describe('getConnectedNodes', () => {
     it('should return connected nodes at depth 1', async () => {
-      await vault.createNote('center.md', '# Center\n\n[[left]] and [[right]]');
-      await vault.createNote('left.md', '# Left');
-      await vault.createNote('right.md', '# Right');
+      const center = makeNote('center.md', '[[left]] and [[right]]', [
+        { target: 'left', type: 'wikilink' },
+        { target: 'right', type: 'wikilink' },
+      ]);
+      const left = makeNote('left.md', 'Left');
+      const right = makeNote('right.md', 'Right');
+
+      mockVault.listNotes.mockResolvedValue(['center.md', 'left.md', 'right.md']);
+      mockVault.readNote.mockImplementation(async (path: string) => {
+        if (path === 'center.md') return center;
+        if (path === 'left.md') return left;
+        if (path === 'right.md') return right;
+        throw new Error(`Not found: ${path}`);
+      });
+
       await graph.buildGraph();
 
       const connected = graph.getConnectedNodes('center.md', 1);
@@ -76,7 +135,9 @@ describe('GraphBuilder', () => {
     });
 
     it('should return empty array for unknown paths', async () => {
+      mockVault.listNotes.mockResolvedValue([]);
       await graph.buildGraph();
+
       const connected = graph.getConnectedNodes('nonexistent.md', 1);
       expect(connected).toHaveLength(0);
     });
@@ -84,8 +145,16 @@ describe('GraphBuilder', () => {
 
   describe('findNodesByTag', () => {
     it('should find nodes by tag', async () => {
-      await vault.createNote('tagged.md', '# Tagged\n\n#research #important');
-      await vault.createNote('other.md', '# Other\n\n#unrelated');
+      const tagged = makeNote('tagged.md', '#research #important', [], ['research', 'important']);
+      const other = makeNote('other.md', '#unrelated', [], ['unrelated']);
+
+      mockVault.listNotes.mockResolvedValue(['tagged.md', 'other.md']);
+      mockVault.readNote.mockImplementation(async (path: string) => {
+        if (path === 'tagged.md') return tagged;
+        if (path === 'other.md') return other;
+        throw new Error(`Not found: ${path}`);
+      });
+
       await graph.buildGraph();
 
       const results = graph.findNodesByTag('research');
@@ -94,7 +163,11 @@ describe('GraphBuilder', () => {
     });
 
     it('should normalize tag with # prefix', async () => {
-      await vault.createNote('tagged.md', '# Tagged\n\n#myTag');
+      const tagged = makeNote('tagged.md', '#myTag', [], ['mytag']);
+
+      mockVault.listNotes.mockResolvedValue(['tagged.md']);
+      mockVault.readNote.mockResolvedValue(tagged);
+
       await graph.buildGraph();
 
       const results = graph.findNodesByTag('#myTag');
@@ -104,15 +177,29 @@ describe('GraphBuilder', () => {
 
   describe('incremental updates', () => {
     it('should update a single node without full rebuild', async () => {
-      await vault.createNote('note1.md', '# Note 1\n\nOriginal');
-      await vault.createNote('note2.md', '# Note 2');
-      await graph.buildGraph();
+      const note1 = makeNote('note1.md', 'Original');
+      const note2 = makeNote('note2.md', 'Note 2');
 
+      mockVault.listNotes.mockResolvedValue(['note1.md', 'note2.md']);
+      mockVault.readNote.mockImplementation(async (path: string) => {
+        if (path === 'note1.md') return note1;
+        if (path === 'note2.md') return note2;
+        throw new Error(`Not found: ${path}`);
+      });
+
+      await graph.buildGraph();
       expect(graph.getStats().totalNodes).toBe(2);
 
-      // Update note1 to link to note2 (use matching wikilink target)
-      await vault.updateNote('note1.md', '# Note 1\n\nNow links to [[note2]]');
-      vault.clearCache();
+      // Update note1 to link to note2
+      const updatedNote1 = makeNote('note1.md', 'Now links to [[note2]]', [
+        { target: 'note2', type: 'wikilink' },
+      ]);
+      mockVault.readNote.mockImplementation(async (path: string) => {
+        if (path === 'note1.md') return updatedNote1;
+        if (path === 'note2.md') return note2;
+        throw new Error(`Not found: ${path}`);
+      });
+
       await graph.updateNode('note1.md');
 
       const backlinks = graph.getBacklinks('note2.md');
@@ -120,10 +207,22 @@ describe('GraphBuilder', () => {
     });
 
     it('should handle new node addition', async () => {
-      await vault.createNote('existing.md', '# Existing');
+      const existing = makeNote('existing.md', 'Existing');
+
+      mockVault.listNotes.mockResolvedValue(['existing.md']);
+      mockVault.readNote.mockResolvedValue(existing);
+
       await graph.buildGraph();
 
-      await vault.createNote('new-note.md', '# New\n\nLinks to [[Existing]]');
+      const newNote = makeNote('new-note.md', 'Links to [[Existing]]', [
+        { target: 'Existing', type: 'wikilink' },
+      ]);
+      mockVault.readNote.mockImplementation(async (path: string) => {
+        if (path === 'existing.md') return existing;
+        if (path === 'new-note.md') return newNote;
+        throw new Error(`Not found: ${path}`);
+      });
+
       await graph.updateNode('new-note.md');
 
       expect(graph.getStats().totalNodes).toBe(2);
@@ -134,10 +233,19 @@ describe('GraphBuilder', () => {
 
   describe('removeNode', () => {
     it('should remove a node and clean up links', async () => {
-      await vault.createNote('source.md', '# Source\n\n[[target]]');
-      await vault.createNote('target.md', '# Target');
-      await graph.buildGraph();
+      const source = makeNote('source.md', '[[target]]', [
+        { target: 'target', type: 'wikilink' },
+      ]);
+      const target = makeNote('target.md', 'Target');
 
+      mockVault.listNotes.mockResolvedValue(['source.md', 'target.md']);
+      mockVault.readNote.mockImplementation(async (path: string) => {
+        if (path === 'source.md') return source;
+        if (path === 'target.md') return target;
+        throw new Error(`Not found: ${path}`);
+      });
+
+      await graph.buildGraph();
       expect(graph.getBacklinks('target.md')).toContain('source.md');
 
       graph.removeNode('source.md');
@@ -149,8 +257,16 @@ describe('GraphBuilder', () => {
 
   describe('exportGraph', () => {
     it('should export nodes and edges', async () => {
-      await vault.createNote('a.md', '# A\n\n[[B]]');
-      await vault.createNote('b.md', '# B\n\n[[A]]');
+      const a = makeNote('a.md', '[[B]]', [{ target: 'B', type: 'wikilink' }]);
+      const b = makeNote('b.md', '[[A]]', [{ target: 'A', type: 'wikilink' }]);
+
+      mockVault.listNotes.mockResolvedValue(['a.md', 'b.md']);
+      mockVault.readNote.mockImplementation(async (path: string) => {
+        if (path === 'a.md') return a;
+        if (path === 'b.md') return b;
+        throw new Error(`Not found: ${path}`);
+      });
+
       await graph.buildGraph();
 
       const exported = graph.exportGraph();

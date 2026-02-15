@@ -1,15 +1,22 @@
 # obsidian-mcp-ultra
 
-A high-performance MCP (Model Context Protocol) server that exposes Obsidian vaults as structured, queryable knowledge graphs for AI agents.
+A high-performance MCP (Model Context Protocol) server that exposes Obsidian vaults as structured, queryable knowledge graphs for AI agents. Uses the [Obsidian Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) plugin to communicate with Obsidian, ensuring full compatibility with plugins, sync, and live editing.
+
+## Prerequisites
+
+1. [Obsidian](https://obsidian.md/) installed and running
+2. [Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) plugin installed and enabled in Obsidian
+3. Copy your API key from Obsidian Settings > Local REST API
 
 ## Features
 
 - 🔍 **Semantic Parsing**: Extracts atomic semantic units (links, backlinks, tags, headings) from Markdown
 - 🕸️ **Knowledge Graph**: Builds and maintains a graph representation of your vault
 - ⚡ **Low-Latency**: In-memory caching for fast retrieval
-- 🔐 **Safe Edits**: Bidirectional read/write operations with validation
+- 🔐 **Safe Edits**: Bidirectional read/write operations via Obsidian's API
 - 🎯 **Context Injection**: Scoped context for agentic workflows
 - 📊 **Rich Queries**: Search by content, tags, and graph structure
+- 🔌 **Plugin-Aware**: Works through Obsidian, respecting plugins, sync, and metadata
 
 ## Installation
 
@@ -22,12 +29,14 @@ npm install obsidian-mcp-ultra
 ### As a Standalone Server
 
 ```bash
-# Run directly
-obsidian-mcp-ultra /path/to/your/vault
+# Run with API key
+OBSIDIAN_API_KEY=your-api-key obsidian-mcp-ultra
 
-# Or using environment variable
-export OBSIDIAN_VAULT_PATH=/path/to/your/vault
-obsidian-mcp-ultra
+# Or pass API key as argument
+obsidian-mcp-ultra your-api-key
+
+# Custom API URL (default: http://127.0.0.1:27123)
+OBSIDIAN_API_URL=http://localhost:27123 OBSIDIAN_API_KEY=your-api-key obsidian-mcp-ultra
 ```
 
 ### As an MCP Server (Claude Desktop)
@@ -40,9 +49,12 @@ Add to your Claude Desktop configuration (`~/Library/Application Support/Claude/
     "obsidian-mcp-ultra": {
       "command": "node",
       "args": [
-        "/path/to/obsidian-mcp-ultra/dist/index.js",
-        "/path/to/your/vault"
-      ]
+        "/path/to/obsidian-mcp-ultra/dist/index.js"
+      ],
+      "env": {
+        "OBSIDIAN_API_URL": "http://127.0.0.1:27123",
+        "OBSIDIAN_API_KEY": "your-api-key-here"
+      }
     }
   }
 }
@@ -138,7 +150,7 @@ obsidian-mcp-ultra
 ├── Parser Layer
 │   └── Extracts frontmatter, links, tags, headings
 ├── Vault Interface
-│   └── Filesystem operations with caching
+│   └── Obsidian REST API client with caching
 ├── Graph Builder
 │   └── Constructs and queries knowledge graph
 └── MCP Server
@@ -156,8 +168,8 @@ npm install
 # Build
 npm run build
 
-# Run in development mode
-npm run dev /path/to/vault
+# Run in development mode (requires Obsidian + Local REST API plugin)
+OBSIDIAN_API_KEY=your-key npm run dev
 
 # Run tests
 npm test
@@ -199,8 +211,8 @@ my-vault/
 
 ## Security
 
-- **Path Validation**: All file paths are validated and sanitized
-- **Vault Isolation**: Server only accesses files within the vault
+- **API Key Authentication**: All requests authenticated via Bearer token
+- **No Direct Filesystem Access**: All operations go through Obsidian's REST API
 - **No Code Execution**: No dynamic code execution or eval
 - **Read-Only by Default**: Write operations require explicit tool calls
 
@@ -231,23 +243,24 @@ npm run build
 # Run tests
 npm test
 
-# Test with sample vault
-npx tsx examples/test-vault.ts
+# Test with a live Obsidian vault (requires Local REST API plugin)
+OBSIDIAN_API_KEY=your-key npx tsx examples/test-vault.ts
 ```
 
-All tests should pass and the sample vault should be processed successfully.
+All tests should pass and the vault should be queried successfully.
 
 ### MCP Server Test
 
 Test the MCP server directly:
 
 ```bash
-# Start the server with sample vault
-node dist/index.js examples/sample-vault
+# Start the server
+OBSIDIAN_API_KEY=your-key node dist/index.js
 ```
 
 The server should output:
 ```
+Connected to Obsidian REST API
 Building vault graph...
 Graph built successfully
 Obsidian MCP Ultra server running on stdio
@@ -259,11 +272,14 @@ Press Ctrl+C to stop the server.
 
 ### Common Issues
 
+**Issue:** `Cannot connect to Obsidian REST API`
+**Solution:** Ensure Obsidian is running with the Local REST API plugin enabled
+
+**Issue:** `Cannot authenticate with Obsidian REST API (HTTP 401)`
+**Solution:** Check your `OBSIDIAN_API_KEY` matches the key in Obsidian Settings > Local REST API
+
 **Issue:** `Cannot find module '@modelcontextprotocol/sdk'`
 **Solution:** Run `npm install` to install dependencies
-
-**Issue:** `ENOENT: no such file or directory`
-**Solution:** Ensure the vault path is absolute and exists
 
 **Issue:** TypeScript compilation errors
 **Solution:** Run `npm run build` to compile TypeScript

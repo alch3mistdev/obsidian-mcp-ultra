@@ -1,47 +1,74 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { promises as fs } from 'fs';
-import { join } from 'path';
-import { mkdtemp } from 'fs/promises';
-import { tmpdir } from 'os';
+import { describe, it, expect, beforeEach, afterEach, vi, type Mock } from 'vitest';
 import { Vault } from '../src/vault/vault.js';
 
 describe('Vault', () => {
-  let tempDir: string;
   let vault: Vault;
+  let fetchMock: Mock;
 
-  beforeEach(async () => {
-    // Create a temporary vault directory
-    tempDir = await mkdtemp(join(tmpdir(), 'vault-test-'));
-    vault = new Vault({ path: tempDir, cacheEnabled: true });
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    globalThis.fetch = fetchMock;
+    vault = new Vault({
+      apiUrl: 'http://localhost:27123',
+      apiKey: 'test-api-key',
+      cacheEnabled: true,
+    });
   });
 
-  afterEach(async () => {
-    // Clean up temporary directory
-    await fs.rm(tempDir, { recursive: true, force: true });
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   describe('createNote', () => {
     it('should create a new note', async () => {
       const content = '# Test Note\n\nTest content';
+
+      fetchMock
+        // PUT to create
+        .mockResolvedValueOnce(new Response(null, { status: 204 }))
+        // GET to read back
+        .mockResolvedValueOnce(new Response(content, { status: 200 }));
+
       const note = await vault.createNote('test.md', content);
 
       expect(note.title).toBe('test');
       expect(note.content).toContain('Test content');
       expect(note.path).toBe('test.md');
+      expect(fetchMock).toHaveBeenCalledWith(
+        'http://localhost:27123/vault/test.md',
+        expect.objectContaining({ method: 'PUT' }),
+      );
     });
 
     it('should create nested notes', async () => {
       const content = 'Nested content';
-      const note = await vault.createNote('folder/nested.md', content);
 
+      fetchMock
+        // PUT to create
+        .mockResolvedValueOnce(new Response(null, { status: 204 }))
+        // GET to read back
+        .mockResolvedValueOnce(new Response(content, { status: 200 }))
+        // GET for noteExists check
+        .mockResolvedValueOnce(new Response(content, { status: 200 }));
+
+      const note = await vault.createNote('folder/nested.md', content);
       expect(note.path).toBe('folder/nested.md');
-      expect(await vault.noteExists('folder/nested.md')).toBe(true);
+
+      const exists = await vault.noteExists('folder/nested.md');
+      expect(exists).toBe(true);
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        'http://localhost:27123/vault/folder/nested.md',
+        expect.objectContaining({ method: 'PUT' }),
+      );
     });
   });
 
   describe('readNote', () => {
-    it('should read an existing note', async () => {
-      await vault.createNote('test.md', '---\ntitle: Test\n---\n\n# Test\n\nContent');
+    it('should read a note via API', async () => {
+      const content = '---\ntitle: Test\n---\n\n# Test\n\nContent';
+      fetchMock.mockResolvedValueOnce(new Response(content, { status: 200 }));
+
       const note = await vault.readNote('test.md');
 
       expect(note.title).toBe('Test');
@@ -49,36 +76,54 @@ describe('Vault', () => {
     });
 
     it('should cache notes when enabled', async () => {
-      await vault.createNote('cached.md', 'Cached content');
+      const content = 'Cached content';
+      fetchMock.mockResolvedValueOnce(new Response(content, { status: 200 }));
 
-      // First read
       const note1 = await vault.readNote('cached.md');
-
-      // Second read should use cache
       const note2 = await vault.readNote('cached.md');
 
       expect(note1).toEqual(note2);
+      // fetch should only be called once (second read uses cache)
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     });
   });
 
   describe('updateNote', () => {
     it('should update an existing note', async () => {
-      await vault.createNote('update.md', 'Original');
-      const updated = await vault.updateNote('update.md', 'Updated content');
+      fetchMock
+        // GET for noteExists check
+        .mockResolvedValueOnce(new Response('Original', { status: 200 }))
+        // PUT to update
+        .mockResolvedValueOnce(new Response(null, { status: 204 }))
+        // GET to read back
+        .mockResolvedValueOnce(new Response('Updated content', { status: 200 }));
 
+      const updated = await vault.updateNote('update.md', 'Updated content');
       expect(updated.content).toBe('Updated content');
     });
 
     it('should throw error for non-existent note', async () => {
+      fetchMock.mockResolvedValueOnce(new Response(null, { status: 404 }));
       await expect(vault.updateNote('nonexistent.md', 'content')).rejects.toThrow();
     });
   });
 
   describe('listNotes', () => {
     it('should list all notes', async () => {
-      await vault.createNote('note1.md', 'Content 1');
-      await vault.createNote('note2.md', 'Content 2');
-      await vault.createNote('folder/note3.md', 'Content 3');
+      // Root directory listing
+      fetchMock.mockResolvedValueOnce(
+        new Response(JSON.stringify({ files: ['note1.md', 'note2.md', 'folder/'] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+      // Subdirectory listing
+      fetchMock.mockResolvedValueOnce(
+        new Response(JSON.stringify({ files: ['note3.md'] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
 
       const notes = await vault.listNotes();
 
@@ -89,35 +134,57 @@ describe('Vault', () => {
     });
 
     it('should return empty array for empty vault', async () => {
+      fetchMock.mockResolvedValueOnce(
+        new Response(JSON.stringify({ files: [] }), { status: 200 }),
+      );
+
       const notes = await vault.listNotes();
       expect(notes).toHaveLength(0);
     });
   });
 
   describe('searchNotes', () => {
-    beforeEach(async () => {
-      await vault.createNote('javascript.md', '# JavaScript Guide\n\nLearn JavaScript');
-      await vault.createNote('python.md', '# Python Tutorial\n\nLearn Python');
-      await vault.createNote('tags.md', '---\ntags: [javascript, coding]\n---\n\nCode examples');
-    });
+    it('should search via API', async () => {
+      fetchMock.mockResolvedValueOnce(
+        new Response(
+          JSON.stringify([
+            { filename: 'javascript.md', matches: [{ match: { start: 0, end: 10 }, context: 'JavaScript Guide' }] },
+          ]),
+          { status: 200 },
+        ),
+      );
 
-    it('should search by title', async () => {
       const results = await vault.searchNotes('JavaScript Guide');
       expect(results).toHaveLength(1);
       expect(results[0]).toBe('javascript.md');
     });
 
-    it('should search by content', async () => {
+    it('should return multiple results', async () => {
+      fetchMock.mockResolvedValueOnce(
+        new Response(
+          JSON.stringify([
+            { filename: 'javascript.md', matches: [{ match: { start: 0, end: 5 }, context: 'Learn JavaScript' }] },
+            { filename: 'python.md', matches: [{ match: { start: 0, end: 5 }, context: 'Learn Python' }] },
+          ]),
+          { status: 200 },
+        ),
+      );
+
       const results = await vault.searchNotes('Learn');
       expect(results.length).toBeGreaterThanOrEqual(2);
     });
 
-    it('should search by tag', async () => {
-      const results = await vault.searchNotes('javascript');
-      expect(results).toContain('tags.md');
-    });
-
     it('should respect limit parameter', async () => {
+      fetchMock.mockResolvedValueOnce(
+        new Response(
+          JSON.stringify([
+            { filename: 'a.md', matches: [] },
+            { filename: 'b.md', matches: [] },
+          ]),
+          { status: 200 },
+        ),
+      );
+
       const results = await vault.searchNotes('Learn', 1);
       expect(results).toHaveLength(1);
     });
@@ -125,29 +192,56 @@ describe('Vault', () => {
 
   describe('deleteNote', () => {
     it('should delete a note', async () => {
-      await vault.createNote('delete-me.md', 'Content');
-      expect(await vault.noteExists('delete-me.md')).toBe(true);
+      // noteExists check
+      fetchMock.mockResolvedValueOnce(new Response('Content', { status: 200 }));
+      const existsBefore = await vault.noteExists('delete-me.md');
+      expect(existsBefore).toBe(true);
 
+      // DELETE request
+      fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
       await vault.deleteNote('delete-me.md');
-      expect(await vault.noteExists('delete-me.md')).toBe(false);
+
+      // noteExists check after delete
+      fetchMock.mockResolvedValueOnce(new Response(null, { status: 404 }));
+      const existsAfter = await vault.noteExists('delete-me.md');
+      expect(existsAfter).toBe(false);
     });
 
     it('should clear cache entry on delete', async () => {
-      await vault.createNote('cached-delete.md', 'Content');
+      const content = 'Content';
+
       // Read to populate cache
+      fetchMock.mockResolvedValueOnce(new Response(content, { status: 200 }));
       await vault.readNote('cached-delete.md');
+
       // Delete
+      fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
       await vault.deleteNote('cached-delete.md');
-      // Should throw because file is gone, not return cached version
+
+      // Should call API again (not use cache) and get 404
+      fetchMock.mockResolvedValueOnce(new Response(null, { status: 404 }));
       await expect(vault.readNote('cached-delete.md')).rejects.toThrow();
     });
   });
 
   describe('getStats', () => {
     it('should return vault statistics', async () => {
-      await vault.createNote('note1.md', '# Note 1\n\nLinks to [[note2]]');
-      await vault.createNote('note2.md', '# Note 2\n\n#tag1 #tag2');
-      await vault.createNote('orphan.md', 'Orphaned note');
+      // listNotes - root directory
+      fetchMock.mockResolvedValueOnce(
+        new Response(JSON.stringify({ files: ['note1.md', 'note2.md', 'orphan.md'] }), { status: 200 }),
+      );
+      // readNote for note1
+      fetchMock.mockResolvedValueOnce(
+        new Response('# Note 1\n\nLinks to [[note2]]', { status: 200 }),
+      );
+      // readNote for note2
+      fetchMock.mockResolvedValueOnce(
+        new Response('# Note 2\n\n#tag1 #tag2', { status: 200 }),
+      );
+      // readNote for orphan
+      fetchMock.mockResolvedValueOnce(
+        new Response('Orphaned note', { status: 200 }),
+      );
 
       const stats = await vault.getStats();
 
@@ -157,18 +251,26 @@ describe('Vault', () => {
     });
   });
 
-  describe('path traversal protection', () => {
-    it('should reject paths that escape vault root', async () => {
-      await expect(vault.readNote('../../etc/passwd')).rejects.toThrow('Path traversal detected');
+  describe('authentication', () => {
+    it('should include Authorization header in requests', async () => {
+      fetchMock.mockResolvedValueOnce(new Response('content', { status: 200 }));
+      await vault.readNote('test.md');
+
+      const [, options] = fetchMock.mock.calls[0];
+      const headers = new Headers(options.headers);
+      expect(headers.get('Authorization')).toBe('Bearer test-api-key');
+    });
+  });
+
+  describe('error handling', () => {
+    it('should handle API errors gracefully', async () => {
+      fetchMock.mockResolvedValueOnce(new Response(null, { status: 500 }));
+      await expect(vault.readNote('test.md')).rejects.toThrow('Failed to read note');
     });
 
-    it('should reject paths with .. components', async () => {
-      await expect(vault.createNote('../outside.md', 'content')).rejects.toThrow('Path traversal detected');
-    });
-
-    it('should allow valid nested paths', async () => {
-      const note = await vault.createNote('folder/subfolder/note.md', 'content');
-      expect(note.path).toBe('folder/subfolder/note.md');
+    it('should throw on 404 for readNote', async () => {
+      fetchMock.mockResolvedValueOnce(new Response(null, { status: 404 }));
+      await expect(vault.readNote('missing.md')).rejects.toThrow('Note not found');
     });
   });
 });

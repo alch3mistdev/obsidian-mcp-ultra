@@ -1,9 +1,8 @@
 /**
- * Vault interface for accessing and manipulating Obsidian vault files
+ * Vault interface for accessing and manipulating Obsidian vault
+ * via the Obsidian Local REST API plugin.
  */
 
-import { promises as fs } from 'fs';
-import { join, relative, dirname, resolve } from 'path';
 import type { VaultConfig, Note, VaultStats } from '../types.js';
 import { MarkdownParser } from '../parser/markdown.js';
 
@@ -19,18 +18,11 @@ export class Vault {
   }
 
   /**
-   * Get the vault path
-   */
-  getPath(): string {
-    return this.config.path;
-  }
-
-  /**
    * List all markdown files in the vault
    */
   async listNotes(): Promise<string[]> {
     const notes: string[] = [];
-    await this.scanDirectory(this.config.path, notes);
+    await this.listDirectory('', notes);
     return notes.sort();
   }
 
@@ -38,23 +30,29 @@ export class Vault {
    * Read and parse a note by its path
    */
   async readNote(notePath: string): Promise<Note> {
-    // Check cache first
-    if (this.config.cacheEnabled && this.cache.has(notePath)) {
-      return this.cache.get(notePath)!;
+    const normalized = this.normalizePath(notePath);
+
+    if (this.config.cacheEnabled && this.cache.has(normalized)) {
+      return this.cache.get(normalized)!;
     }
 
-    const fullPath = this.resolveNotePath(notePath);
-    const content = await fs.readFile(fullPath, 'utf-8');
-    const note = this.parser.parse(content, notePath);
+    const response = await this.request(
+      `/vault/${this.encodeURIPath(normalized)}`,
+      { headers: { 'Accept': 'text/markdown' } },
+    );
 
-    // Get file stats
-    const stats = await fs.stat(fullPath);
-    note.created = stats.birthtime;
-    note.modified = stats.mtime;
+    if (!response.ok) {
+      if (response.status === 404) {
+        throw new Error(`Note not found: ${normalized}`);
+      }
+      throw new Error(`Failed to read note '${normalized}': ${response.status}`);
+    }
 
-    // Cache the note
+    const content = await response.text();
+    const note = this.parser.parse(content, normalized);
+
     if (this.config.cacheEnabled) {
-      this.cache.set(notePath, note);
+      this.cache.set(normalized, note);
     }
 
     return note;
@@ -64,97 +62,110 @@ export class Vault {
    * Create a new note
    */
   async createNote(notePath: string, content: string): Promise<Note> {
-    const fullPath = this.resolveNotePath(notePath);
+    const normalized = this.normalizePath(notePath);
 
-    // Ensure directory exists
-    await fs.mkdir(dirname(fullPath), { recursive: true });
+    const response = await this.request(
+      `/vault/${this.encodeURIPath(normalized)}`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'text/markdown' },
+        body: content,
+      },
+    );
 
-    // Write the file
-    await fs.writeFile(fullPath, content, 'utf-8');
+    if (!response.ok) {
+      throw new Error(`Failed to create note '${normalized}': ${response.status}`);
+    }
 
-    // Invalidate cache
-    this.cache.delete(notePath);
-
-    return this.readNote(notePath);
+    this.cache.delete(normalized);
+    return this.readNote(normalized);
   }
 
   /**
    * Update an existing note
    */
   async updateNote(notePath: string, content: string): Promise<Note> {
-    const fullPath = this.resolveNotePath(notePath);
+    const normalized = this.normalizePath(notePath);
 
-    // Verify file exists
-    await fs.access(fullPath);
+    const exists = await this.noteExists(normalized);
+    if (!exists) {
+      throw new Error(`Note not found: ${normalized}`);
+    }
 
-    // Write the file
-    await fs.writeFile(fullPath, content, 'utf-8');
+    const response = await this.request(
+      `/vault/${this.encodeURIPath(normalized)}`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'text/markdown' },
+        body: content,
+      },
+    );
 
-    // Invalidate cache
-    this.cache.delete(notePath);
+    if (!response.ok) {
+      throw new Error(`Failed to update note '${normalized}': ${response.status}`);
+    }
 
-    return this.readNote(notePath);
+    this.cache.delete(normalized);
+    return this.readNote(normalized);
   }
 
   /**
    * Delete a note
    */
   async deleteNote(notePath: string): Promise<void> {
-    const fullPath = this.resolveNotePath(notePath);
-    await fs.unlink(fullPath);
-    this.cache.delete(notePath);
+    const normalized = this.normalizePath(notePath);
+
+    const response = await this.request(
+      `/vault/${this.encodeURIPath(normalized)}`,
+      { method: 'DELETE' },
+    );
+
+    if (!response.ok && response.status !== 404) {
+      throw new Error(`Failed to delete note '${normalized}': ${response.status}`);
+    }
+
+    this.cache.delete(normalized);
   }
 
   /**
    * Check if a note exists
    */
   async noteExists(notePath: string): Promise<boolean> {
-    try {
-      const fullPath = this.resolveNotePath(notePath);
-      await fs.access(fullPath);
-      return true;
-    } catch {
-      return false;
-    }
+    const normalized = this.normalizePath(notePath);
+
+    const response = await this.request(
+      `/vault/${this.encodeURIPath(normalized)}`,
+      { headers: { 'Accept': 'text/markdown' } },
+    );
+
+    return response.ok;
   }
 
   /**
-   * Search notes by content or title
+   * Search notes using the Obsidian REST API simple search
    */
   async searchNotes(query: string, limit = 10): Promise<string[]> {
-    const allNotes = await this.listNotes();
-    const queryLower = query.toLowerCase();
-    const results: Array<{ path: string; score: number }> = [];
+    const response = await this.request(
+      `/search/simple/?query=${encodeURIComponent(query)}&contextLength=100`,
+      {
+        method: 'POST',
+        headers: { 'Accept': 'application/json' },
+      },
+    );
 
-    for (const notePath of allNotes) {
-      const note = await this.readNote(notePath);
-      let score = 0;
-
-      // Check title match
-      if (note.title.toLowerCase().includes(queryLower)) {
-        score += 10;
-      }
-
-      // Check content match
-      if (note.content.toLowerCase().includes(queryLower)) {
-        score += 5;
-      }
-
-      // Check tag match
-      if (note.tags.some(tag => tag.includes(queryLower))) {
-        score += 3;
-      }
-
-      if (score > 0) {
-        results.push({ path: notePath, score });
-      }
+    if (!response.ok) {
+      throw new Error(`Search failed: ${response.status}`);
     }
 
-    // Sort by score and return top results
+    const results = await response.json() as Array<{
+      filename: string;
+      matches: Array<{ match: { start: number; end: number }; context: string }>;
+    }>;
+
     return results
-      .sort((a, b) => b.score - a.score)
       .slice(0, limit)
-      .map(r => r.path);
+      .map(r => r.filename)
+      .filter(f => f.endsWith('.md'));
   }
 
   /**
@@ -171,7 +182,6 @@ export class Vault {
       totalLinks += note.links.length;
       note.tags.forEach(tag => allTags.add(tag));
 
-      // A note is orphaned if it has no outgoing links and no backlinks
       if (note.links.length === 0 && note.backlinks.length === 0) {
         orphanedCount++;
       }
@@ -193,42 +203,57 @@ export class Vault {
   }
 
   /**
-   * Resolve a note path to an absolute filesystem path.
-   * Validates the resolved path stays within the vault root to prevent path traversal.
+   * Make an authenticated request to the Obsidian REST API
    */
-  private resolveNotePath(notePath: string): string {
-    // Remove leading slash if present
-    const cleanPath = notePath.replace(/^\//, '');
-    // Ensure .md extension
-    const pathWithExt = cleanPath.endsWith('.md') ? cleanPath : `${cleanPath}.md`;
-    const resolved = resolve(this.config.path, pathWithExt);
-    const vaultRoot = resolve(this.config.path);
+  private async request(path: string, options: RequestInit = {}): Promise<Response> {
+    const url = `${this.config.apiUrl}${path}`;
+    const headers = new Headers(options.headers);
+    headers.set('Authorization', `Bearer ${this.config.apiKey}`);
 
-    if (!resolved.startsWith(vaultRoot + '/') && resolved !== vaultRoot) {
-      throw new Error('Path traversal detected: path escapes vault root');
-    }
-
-    return resolved;
+    return fetch(url, { ...options, headers });
   }
 
   /**
-   * Recursively scan directory for markdown files
+   * Normalize a note path: strip leading slash, ensure .md extension
    */
-  private async scanDirectory(dirPath: string, results: string[]): Promise<void> {
-    const entries = await fs.readdir(dirPath, { withFileTypes: true });
+  private normalizePath(notePath: string): string {
+    const clean = notePath.replace(/^\//, '');
+    return clean.endsWith('.md') ? clean : `${clean}.md`;
+  }
 
-    for (const entry of entries) {
-      const fullPath = join(dirPath, entry.name);
+  /**
+   * Encode path segments for use in URLs (preserves forward slashes)
+   */
+  private encodeURIPath(path: string): string {
+    return path.split('/').map(encodeURIComponent).join('/');
+  }
 
-      if (entry.isDirectory()) {
-        // Skip hidden directories
-        if (!entry.name.startsWith('.')) {
-          await this.scanDirectory(fullPath, results);
+  /**
+   * Recursively list markdown files via the REST API directory listing
+   */
+  private async listDirectory(dirPath: string, results: string[]): Promise<void> {
+    const apiPath = dirPath ? `/vault/${this.encodeURIPath(dirPath)}/` : '/vault/';
+    const response = await this.request(apiPath, {
+      headers: { 'Accept': 'application/json' },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to list directory '${dirPath}': ${response.status}`);
+    }
+
+    const data = await response.json() as { files: string[] };
+
+    for (const file of data.files) {
+      if (file.endsWith('/')) {
+        // Subdirectory — skip hidden dirs
+        const name = file.slice(0, -1).split('/').pop() || '';
+        if (!name.startsWith('.')) {
+          const subdir = dirPath ? `${dirPath}/${file.slice(0, -1)}` : file.slice(0, -1);
+          await this.listDirectory(subdir, results);
         }
-      } else if (entry.isFile() && entry.name.endsWith('.md')) {
-        // Store relative path from vault root
-        const relativePath = relative(this.config.path, fullPath);
-        results.push(relativePath);
+      } else if (file.endsWith('.md')) {
+        const fullPath = dirPath ? `${dirPath}/${file}` : file;
+        results.push(fullPath);
       }
     }
   }
