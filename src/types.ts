@@ -54,3 +54,15 @@ export interface VaultStats {
   totalTags: number;
   orphanedNotes: number;
 }
+
+export interface SearchHit {
+  path: string;
+  title: string;
+  score: number;
+  excerpt: string;
+}
+
+export interface VaultChanges {
+  added: string[];
+  deleted: string[];
+}

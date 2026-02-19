@@ -274,4 +274,245 @@ describe('GraphBuilder', () => {
       expect(exported.edges).toHaveLength(2);
     });
   });
+
+  describe('findShortestPath', () => {
+    it('should find shortest path in a linear chain', async () => {
+      const a = makeNote('a.md', '[[b]]', [{ target: 'b', type: 'wikilink' }]);
+      const b = makeNote('b.md', '[[c]]', [{ target: 'c', type: 'wikilink' }]);
+      const c = makeNote('c.md', 'End');
+
+      mockVault.listNotes.mockResolvedValue(['a.md', 'b.md', 'c.md']);
+      mockVault.readNote.mockImplementation(async (path: string) => {
+        if (path === 'a.md') return a;
+        if (path === 'b.md') return b;
+        if (path === 'c.md') return c;
+        throw new Error(`Not found: ${path}`);
+      });
+
+      await graph.buildGraph();
+
+      const path = graph.findShortestPath('a.md', 'c.md');
+      expect(path).toEqual(['a.md', 'b.md', 'c.md']);
+    });
+
+    it('should return null for disconnected nodes', async () => {
+      const a = makeNote('a.md', 'Island A');
+      const b = makeNote('b.md', 'Island B');
+
+      mockVault.listNotes.mockResolvedValue(['a.md', 'b.md']);
+      mockVault.readNote.mockImplementation(async (path: string) => {
+        if (path === 'a.md') return a;
+        if (path === 'b.md') return b;
+        throw new Error(`Not found: ${path}`);
+      });
+
+      await graph.buildGraph();
+
+      const path = graph.findShortestPath('a.md', 'b.md');
+      expect(path).toBeNull();
+    });
+
+    it('should return single-element path for same node', async () => {
+      const a = makeNote('a.md', 'Self');
+      mockVault.listNotes.mockResolvedValue(['a.md']);
+      mockVault.readNote.mockResolvedValue(a);
+
+      await graph.buildGraph();
+
+      const path = graph.findShortestPath('a.md', 'a.md');
+      expect(path).toEqual(['a.md']);
+    });
+
+    it('should return null for unknown nodes', async () => {
+      mockVault.listNotes.mockResolvedValue([]);
+      await graph.buildGraph();
+
+      const path = graph.findShortestPath('x.md', 'y.md');
+      expect(path).toBeNull();
+    });
+  });
+
+  describe('getHubNotes', () => {
+    it('should return most-connected notes first', async () => {
+      // Star graph: hub links to spoke1, spoke2, spoke3
+      const hub = makeNote('hub.md', '[[spoke1]] [[spoke2]] [[spoke3]]', [
+        { target: 'spoke1', type: 'wikilink' },
+        { target: 'spoke2', type: 'wikilink' },
+        { target: 'spoke3', type: 'wikilink' },
+      ]);
+      const spoke1 = makeNote('spoke1.md', 'Spoke 1');
+      const spoke2 = makeNote('spoke2.md', 'Spoke 2');
+      const spoke3 = makeNote('spoke3.md', 'Spoke 3');
+
+      mockVault.listNotes.mockResolvedValue(['hub.md', 'spoke1.md', 'spoke2.md', 'spoke3.md']);
+      mockVault.readNote.mockImplementation(async (path: string) => {
+        if (path === 'hub.md') return hub;
+        if (path === 'spoke1.md') return spoke1;
+        if (path === 'spoke2.md') return spoke2;
+        if (path === 'spoke3.md') return spoke3;
+        throw new Error(`Not found: ${path}`);
+      });
+
+      await graph.buildGraph();
+
+      const hubs = graph.getHubNotes(2);
+      expect(hubs).toHaveLength(2);
+      expect(hubs[0].node.path).toBe('hub.md');
+      expect(hubs[0].degree).toBe(3); // 3 outlinks
+    });
+
+    it('should respect limit parameter', async () => {
+      const a = makeNote('a.md', '[[b]]', [{ target: 'b', type: 'wikilink' }]);
+      const b = makeNote('b.md', 'B');
+
+      mockVault.listNotes.mockResolvedValue(['a.md', 'b.md']);
+      mockVault.readNote.mockImplementation(async (path: string) => {
+        if (path === 'a.md') return a;
+        if (path === 'b.md') return b;
+        throw new Error(`Not found: ${path}`);
+      });
+
+      await graph.buildGraph();
+
+      const hubs = graph.getHubNotes(1);
+      expect(hubs).toHaveLength(1);
+    });
+  });
+
+  describe('getClusters', () => {
+    it('should detect two disconnected clusters', async () => {
+      const a = makeNote('a.md', '[[b]]', [{ target: 'b', type: 'wikilink' }]);
+      const b = makeNote('b.md', 'B');
+      const c = makeNote('c.md', '[[d]]', [{ target: 'd', type: 'wikilink' }]);
+      const d = makeNote('d.md', 'D');
+
+      mockVault.listNotes.mockResolvedValue(['a.md', 'b.md', 'c.md', 'd.md']);
+      mockVault.readNote.mockImplementation(async (path: string) => {
+        if (path === 'a.md') return a;
+        if (path === 'b.md') return b;
+        if (path === 'c.md') return c;
+        if (path === 'd.md') return d;
+        throw new Error(`Not found: ${path}`);
+      });
+
+      await graph.buildGraph();
+
+      const clusters = graph.getClusters(2);
+      expect(clusters).toHaveLength(2);
+      expect(clusters[0]).toHaveLength(2);
+      expect(clusters[1]).toHaveLength(2);
+    });
+
+    it('should filter clusters smaller than minSize', async () => {
+      const a = makeNote('a.md', '[[b]]', [{ target: 'b', type: 'wikilink' }]);
+      const b = makeNote('b.md', 'B');
+      const orphan = makeNote('orphan.md', 'Orphan');
+
+      mockVault.listNotes.mockResolvedValue(['a.md', 'b.md', 'orphan.md']);
+      mockVault.readNote.mockImplementation(async (path: string) => {
+        if (path === 'a.md') return a;
+        if (path === 'b.md') return b;
+        if (path === 'orphan.md') return orphan;
+        throw new Error(`Not found: ${path}`);
+      });
+
+      await graph.buildGraph();
+
+      // minSize=2 should exclude the orphan
+      const clusters = graph.getClusters(2);
+      expect(clusters).toHaveLength(1);
+      expect(clusters[0]).toHaveLength(2);
+    });
+  });
+
+  describe('findBridgeNotes', () => {
+    it('should find bridge in a linear chain', async () => {
+      // A -> B -> C: removing B disconnects A from C
+      const a = makeNote('a.md', '[[b]]', [{ target: 'b', type: 'wikilink' }]);
+      const b = makeNote('b.md', '[[c]]', [{ target: 'c', type: 'wikilink' }]);
+      const c = makeNote('c.md', 'End');
+
+      mockVault.listNotes.mockResolvedValue(['a.md', 'b.md', 'c.md']);
+      mockVault.readNote.mockImplementation(async (path: string) => {
+        if (path === 'a.md') return a;
+        if (path === 'b.md') return b;
+        if (path === 'c.md') return c;
+        throw new Error(`Not found: ${path}`);
+      });
+
+      await graph.buildGraph();
+
+      const bridges = graph.findBridgeNotes();
+      const bridgePaths = bridges.map(b => b.path);
+      expect(bridgePaths).toContain('b.md');
+    });
+
+    it('should find no bridges in a fully connected triangle', async () => {
+      const a = makeNote('a.md', '[[b]] [[c]]', [
+        { target: 'b', type: 'wikilink' },
+        { target: 'c', type: 'wikilink' },
+      ]);
+      const b = makeNote('b.md', '[[a]] [[c]]', [
+        { target: 'a', type: 'wikilink' },
+        { target: 'c', type: 'wikilink' },
+      ]);
+      const c = makeNote('c.md', '[[a]] [[b]]', [
+        { target: 'a', type: 'wikilink' },
+        { target: 'b', type: 'wikilink' },
+      ]);
+
+      mockVault.listNotes.mockResolvedValue(['a.md', 'b.md', 'c.md']);
+      mockVault.readNote.mockImplementation(async (path: string) => {
+        if (path === 'a.md') return a;
+        if (path === 'b.md') return b;
+        if (path === 'c.md') return c;
+        throw new Error(`Not found: ${path}`);
+      });
+
+      await graph.buildGraph();
+
+      const bridges = graph.findBridgeNotes();
+      expect(bridges).toHaveLength(0);
+    });
+  });
+
+  describe('enhanced getStats', () => {
+    it('should include density and component count', async () => {
+      const a = makeNote('a.md', '[[b]]', [{ target: 'b', type: 'wikilink' }]);
+      const b = makeNote('b.md', 'B');
+
+      mockVault.listNotes.mockResolvedValue(['a.md', 'b.md']);
+      mockVault.readNote.mockImplementation(async (path: string) => {
+        if (path === 'a.md') return a;
+        if (path === 'b.md') return b;
+        throw new Error(`Not found: ${path}`);
+      });
+
+      await graph.buildGraph();
+
+      const stats = graph.getStats();
+      expect(stats).toHaveProperty('density');
+      expect(stats).toHaveProperty('components');
+      expect(stats.density).toBeGreaterThan(0);
+      expect(stats.components).toBe(1); // a and b are connected
+    });
+
+    it('should report correct component count for disconnected graph', async () => {
+      const a = makeNote('a.md', 'Island A');
+      const b = makeNote('b.md', 'Island B');
+
+      mockVault.listNotes.mockResolvedValue(['a.md', 'b.md']);
+      mockVault.readNote.mockImplementation(async (path: string) => {
+        if (path === 'a.md') return a;
+        if (path === 'b.md') return b;
+        throw new Error(`Not found: ${path}`);
+      });
+
+      await graph.buildGraph();
+
+      const stats = graph.getStats();
+      expect(stats.components).toBe(2);
+      expect(stats.density).toBe(0);
+    });
+  });
 });
